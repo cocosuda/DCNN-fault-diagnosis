@@ -1,0 +1,225 @@
+import os
+import sys
+import cPickle
+
+import numpy
+
+
+import theano
+import theano.tensor as T
+from theano.tensor.signal import downsample
+from theano.tensor.nnet import conv
+import xlrd
+ 
+def shuru(dataname):
+  excel=xlrd.open_workbook(dataname);
+  sheet=excel.sheets()[0];
+  a=numpy.empty((100,1024))
+  for i in range(100):
+    a[i]=sheet.row_values(i);
+  return a
+  
+
+
+#读取之前保存的训练参数
+#layer0_params~layer3_params都是包含W和b的,layer*_params[0]是W，layer*_params[1]是b
+def load_params(params_file):
+    f=open(params_file,'rb')
+    layer0_params=cPickle.load(f)
+    layer1_params=cPickle.load(f)
+    layer11_params=cPickle.load(f)
+    layer2_params=cPickle.load(f)
+    layer22_params=cPickle.load(f)
+    layer3_params=cPickle.load(f)
+    f.close()
+    return layer0_params,layer1_params, layer11_params,layer2_params,layer22_params,layer3_params
+
+#读取图像，返回numpy.array类型的人脸数据以及对应的label
+def load_data(data0,data1,data2,data3,data4,data5,data6,data7,data8,data9,data10):
+  
+    
+  
+     data=numpy.empty((1000,1024))
+     
+     data[0:100]=shuru(data0);
+     data[100:200]=shuru(data2);
+     data[200:300]=shuru(data3);
+     data[300:400]=shuru(data4);
+     data[400:500]=shuru(data5); 
+     data[500:600]=shuru(data6);
+     data[600:700]=shuru(data7);
+     data[700:800]=shuru(data8);
+     data[800:900]=shuru(data9); 
+     data[900:1000]=shuru(data10);
+
+     label=numpy.empty(1000);
+     label[0:100]=0
+     for i in range(3):
+	label[i*300+100:i*300+400]=i+1
+    
+      
+     label=label.astype(numpy.int)
+     test_data=numpy.empty((500,1024))
+     test_label=numpy.empty(500)
+     test_data[0:50]=data[0:50]
+     test_label[0:50]=label[0:50]
+     for i in range(9):
+       test_data[i*50+50:i*50+100]=data[i*100+100:i*100+150]
+       test_label[i*50+50:i*50+100]=label[i*100+100:i*100+150]
+    
+     return test_data,test_label
+
+
+
+"""
+train_CNN_olivettifaces中的LeNetConvPoolLayer、HiddenLayer、LogisticRegression是随机初始化的
+下面将它们定义为可以用参数来初始化的版本
+"""
+class LogisticRegression(object):
+    def __init__(self, input, params_W,params_b,n_in, n_out):
+        self.W = params_W
+        self.b = params_b
+        self.p_y_given_x = T.nnet.softmax(T.dot(input, self.W) + self.b)
+        self.y_pred = T.argmax(self.p_y_given_x, axis=1)
+        self.params = [self.W, self.b]
+
+    def negative_log_likelihood(self, y):
+        return -T.mean(T.log(self.p_y_given_x)[T.arange(y.shape[0]), y])
+
+    def errors(self, y):
+        if y.ndim != self.y_pred.ndim:
+            raise TypeError(
+                'y should have the same shape as self.y_pred',
+                ('y', y.type, 'y_pred', self.y_pred.type)
+            )
+        if y.dtype.startswith('int'):
+            return T.mean(T.neq(self.y_pred, y))
+        else:
+            raise NotImplementedError()
+
+
+class HiddenLayer(object):
+    def __init__(self, input, params_W,params_b, n_in, n_out,
+                 activation=T.tanh):
+        self.input = input
+        self.W = params_W
+        self.b = params_b
+
+        lin_output = T.dot(input, self.W) + self.b
+        self.output = (
+            lin_output if activation is None
+            else activation(lin_output)
+        )
+        self.params = [self.W, self.b]
+
+	
+#卷积+采样层（conv+maxpooling）
+class LeNetConvPoolLayer(object):
+    def __init__(self,  input,params_W,params_b, filter_shape, image_shape, poolsize=(2, 2)):
+        assert image_shape[1] == filter_shape[1]
+        self.input = input
+        self.W = params_W
+        self.b = params_b
+        # 卷积
+        conv_out = conv.conv2d(
+            input=input,
+            filters=self.W,
+            filter_shape=filter_shape,
+            image_shape=image_shape
+        )
+        # 子采样
+        pooled_out = downsample.max_pool_2d(
+            input=conv_out,
+            ds=poolsize,
+            ignore_border=True
+        )
+        self.output = T.tanh(pooled_out + self.b.dimshuffle('x', 0, 'x', 'x'))
+        self.params = [self.W, self.b]
+
+
+"""
+用之前保存下来的参数初始化CNN，就得到了一个训练好的CNN模型，然后使用这个模型来测图像
+注意：n_kerns跟之前训练的模型要保持一致。dataset是你要测试的图像的路径，params_file是之前训练时保存的参数文件的路径
+"""
+def use_CNN(params_file='params.pkl',nkerns=[5, 10,10]):   
+    
+    #读取测试的图像，这里读取整个olivettifaces.gif，即全部样本，得到faces、label
+    faces,label=load_data('data098.xlsx','data097.xlsx','data106.xlsx','data170.xlsx','data210.xlsx','data118.xlsx','data185.xlsx','data222.xlsx','data145.xlsx','data309.xlsx','data247.xlsx')
+    face_num = faces.shape[0]   #有多少张人脸图
+  
+    #读入参数
+    layer0_params,layer1_params,layer11_params,layer2_params,layer22_params,layer3_params=load_params(params_file)
+    
+    x = T.matrix('x')  #用变量x表示输入的人脸数据，作为layer0的输入
+
+    ######################
+    #用读进来的参数初始化各层参数W、b
+    ######################
+    layer0_input = x.reshape((face_num, 1, 32, 32)) 
+    layer0 = LeNetConvPoolLayer(
+        input=layer0_input,
+        params_W=layer0_params[0],
+        params_b=layer0_params[1],
+        image_shape=(face_num, 1, 32, 32),
+        filter_shape=(nkerns[0], 1, 5, 5),
+        poolsize=(2, 2)
+    )
+
+    layer1 = LeNetConvPoolLayer(
+        input=layer0.output,
+        params_W=layer1_params[0],
+        params_b=layer1_params[1],
+        image_shape=(face_num, nkerns[0], 14, 14),
+        filter_shape=(nkerns[1], nkerns[0], 5, 5),
+        poolsize=(2, 2)
+    )
+    layer11 = LeNetConvPoolLayer(
+        params_W=layer11_params[0],
+        params_b=layer11_params[1],
+        input=layer1.output,
+        image_shape=(face_num, nkerns[1], 5, 5),
+        filter_shape=(nkerns[2], nkerns[1], 2, 2),
+        poolsize=(2, 2)
+    )
+
+    layer2_input = layer11.output.flatten(2)
+    layer2 = HiddenLayer(
+        input=layer2_input,
+        params_W=layer2_params[0],
+        params_b=layer2_params[1],
+        n_in=nkerns[2] * 2 * 2,
+        n_out=100,      
+        activation=T.tanh
+    )
+    layer22_input = layer2.output
+    layer22 = HiddenLayer(
+        params_W=layer22_params[0],
+        params_b=layer22_params[1],
+        input=layer22_input,
+        n_in=100,
+        n_out=50,      #全连接层输出神经元的个数，自己定义的，可以根据需要调节
+        activation=T.tanh
+    )
+    layer3 = LogisticRegression(input=layer22.output, params_W=layer3_params[0],params_b=layer3_params[1],n_in=50, n_out=4)   
+     
+    #定义theano.function，让x作为输入，layer3.y_pred（即预测的类别）作为输出
+    f = theano.function(
+        [x],    #funtion 的输入必须是list，即使只有一个输入
+        layer3.y_pred
+    )
+    
+    #预测的类别pred
+    pred = f(faces)
+    m=layer3.p_y_given_x
+    
+
+    #将预测的类别pred与真正类别label对比，输出错分的图像
+    for i in range(face_num): 
+	 if pred[i] != label[i]:
+                print('picture: %i is person %i, but mis-predicted as person %i' %(i, label[i], pred[i]))
+                print m
+
+
+if __name__ == '__main__':
+	use_CNN()
+
